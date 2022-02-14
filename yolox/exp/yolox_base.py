@@ -29,7 +29,7 @@ class Exp(BaseExp):
         # ---------------- dataloader config ---------------- #
         # set worker to 4 for shorter dataloader init time
         # If your training process cost many memory, reduce this value.
-        self.data_num_workers = 4
+        self.data_num_workers = 0
         self.input_size = (640, 640)  # (height, width)
         # Actual multiscale ranges: [640 - 5 * 32, 640 + 5 * 32].
         # To disable multiscale training, set the value to 0.
@@ -201,7 +201,7 @@ class Exp(BaseExp):
         return train_loader
 
     def random_resize(self, data_loader, epoch, rank, is_distributed):
-        tensor = torch.LongTensor(2).cuda()
+        tensor = torch.LongTensor(2).cpu()
 
         if rank == 0:
             size_factor = self.input_size[1] * 1.0 / self.input_size[0]

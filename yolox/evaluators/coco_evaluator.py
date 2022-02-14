@@ -136,7 +136,7 @@ class COCOEvaluator:
             summary (sr): summary info of evaluation.
         """
         # TODO half to amp_test
-        tensor_type = torch.cuda.HalfTensor if half else torch.cuda.FloatTensor
+        tensor_type = torch.HalfTensor if half else torch.FloatTensor
         model = model.eval()
         if half:
             model = model.half()
@@ -154,7 +154,7 @@ class COCOEvaluator:
             model_trt = TRTModule()
             model_trt.load_state_dict(torch.load(trt_file))
 
-            x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
+            x = torch.ones(1, 3, test_size[0], test_size[1]).cpu()
             model(x)
             model = model_trt
 
@@ -186,7 +186,7 @@ class COCOEvaluator:
 
             data_list.extend(self.convert_to_coco_format(outputs, info_imgs, ids))
 
-        statistics = torch.cuda.FloatTensor([inference_time, nms_time, n_samples])
+        statistics = torch.FloatTensor([inference_time, nms_time, n_samples])
         if distributed:
             data_list = gather(data_list, dst=0)
             data_list = list(itertools.chain(*data_list))
