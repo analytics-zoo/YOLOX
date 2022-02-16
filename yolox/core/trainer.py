@@ -8,12 +8,9 @@ import time
 from loguru import logger
 
 import torch
-import torchvision
-import torchvision.transforms as transforms
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
 
-# from yolox.data import DataPrefetcher
 from yolox.utils import (
     MeterBuffer,
     ModelEMA,
@@ -84,23 +81,17 @@ class Trainer:
             self.after_epoch()
 
     def train_in_iter(self):
-         for self.iter in range(self.max_iter):
+        for self.iter in range(self.max_iter):
             self.before_iter()
             self.train_one_iter()
             self.after_iter()
 
-
     def train_one_iter(self):
         iter_start_time = time.time()
-        dataiter = iter(self.train_loader)        
+        dataiter = iter(self.train_loader)
         inps, targets, *others = dataiter.next()
-        # inps, targets = self.prefetcher.next()
-        # inps = inps.to(self.data_type)
-        # targets = targets.to(self.data_type)
-        # targets.requires_grad = False
         inps, targets = self.exp.preprocess(inps, targets, self.input_size)
         data_end_time = time.time()
-
         outputs = self.model(inps, targets)
         loss = outputs["total_loss"]
         self.optimizer.zero_grad()
@@ -140,18 +131,6 @@ class Trainer:
         model = self.resume_train(model)
 
         # data related init
-        '''root = os.getcwd() + '/datasets/COCO/train2017'
-        annFile = os.getcwd() + '/datasets/COCO/annotations/instances_train2017.json'
-        transform = transforms.Compose([transforms.ToTensor(),
-                                        transforms.Resize((640, 640))])
-        coco_train = torchvision.datasets.CocoDetection(
-            root = root,
-            annFile = annFile,
-            transform=transform)
-        trainloader = torch.utils.data.DataLoader(
-            coco_train, batch_size=self.args.batch_size,
-            shuffle=True, num_workers=0, collate_fn=lambda x: x)'''
-
         self.no_aug = self.start_epoch >= self.max_epoch - self.exp.no_aug_epochs
         self.train_loader = self.exp.get_data_loader(
             batch_size=self.args.batch_size,
@@ -159,8 +138,6 @@ class Trainer:
             no_aug=self.no_aug,
             cache_img=self.args.cache,
         )
-        # logger.info("init prefetcher, this might take one minute or less...")
-        # self.prefetcher = DataPrefetcher(self.train_loader)
         # max_iter means iters per epoch
         self.max_iter = len(self.train_loader)
 
