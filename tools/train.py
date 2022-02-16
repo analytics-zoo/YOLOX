@@ -8,6 +8,7 @@ import warnings
 from loguru import logger
 
 import torch
+import torch.backends.cudnn as cudnn
 
 from yolox.core import Trainer, launch
 from yolox.exp import get_exp
@@ -93,10 +94,17 @@ def main(exp, args):
     if exp.seed is not None:
         random.seed(exp.seed)
         torch.manual_seed(exp.seed)
+        cudnn.deterministic = True
+        warnings.warn(
+            "You have chosen to seed training. This will turn on the CUDNN deterministic setting, "
+            "which can slow down your training considerably! You may see unexpected behavior "
+            "when restarting from checkpoints."
+        )
 
     # set environment variables for distributed training
     configure_nccl()
     configure_omp()
+    cudnn.benchmark = True
 
     trainer = Trainer(exp, args)
     trainer.train()
