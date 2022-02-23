@@ -136,7 +136,7 @@ class COCOEvaluator:
             summary (sr): summary info of evaluation.
         """
         # TODO half to amp_test
-        tensor_type = torch.cuda.HalfTensor if half else torch.cuda.FloatTensor
+        tensor_type = torch.HalfTensor if half else torch.FloatTensor
         model = model.eval()
         if half:
             model = model.half()
@@ -154,7 +154,7 @@ class COCOEvaluator:
             model_trt = TRTModule()
             model_trt.load_state_dict(torch.load(trt_file))
 
-            x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
+            x = torch.ones(1, 3, test_size[0], test_size[1]).cpu()
             model(x)
             model = model_trt
 
@@ -186,7 +186,7 @@ class COCOEvaluator:
 
             data_list.extend(self.convert_to_coco_format(outputs, info_imgs, ids))
 
-        statistics = torch.cuda.FloatTensor([inference_time, nms_time, n_samples])
+        statistics = torch.FloatTensor([inference_time, nms_time, n_samples])
         if distributed:
             data_list = gather(data_list, dst=0)
             data_list = list(itertools.chain(*data_list))
@@ -280,14 +280,10 @@ class COCOEvaluator:
             with contextlib.redirect_stdout(redirect_string):
                 cocoEval.summarize()
             info += redirect_string.getvalue()
-            cat_ids = list(cocoGt.cats.keys())
-            cat_names = [cocoGt.cats[catId]['name'] for catId in sorted(cat_ids)]
             if self.per_class_AP:
-                AP_table = per_class_AP_table(cocoEval, class_names=cat_names)
-                info += "per class AP:\n" + AP_table + "\n"
+                info += "per class AP:\n" + per_class_AP_table(cocoEval) + "\n"
             if self.per_class_AR:
-                AR_table = per_class_AR_table(cocoEval, class_names=cat_names)
-                info += "per class AR:\n" + AR_table + "\n"
+                info += "per class AR:\n" + per_class_AR_table(cocoEval) + "\n"
             return cocoEval.stats[0], cocoEval.stats[1], info
         else:
             return 0, 0, info
