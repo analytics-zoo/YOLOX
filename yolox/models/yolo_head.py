@@ -510,10 +510,10 @@ class YOLOXHead(nn.Module):
         del pair_wise_cls_loss, cost, pair_wise_ious, pair_wise_ious_loss
 
         if mode == "cpu":
-            gt_matched_classes = gt_matched_classes.cuda()
-            fg_mask = fg_mask.cuda()
-            pred_ious_this_matching = pred_ious_this_matching.cuda()
-            matched_gt_inds = matched_gt_inds.cuda()
+            gt_matched_classes = gt_matched_classes.cpu()
+            fg_mask = fg_mask.cpu()
+            pred_ious_this_matching = pred_ious_this_matching.cpu()
+            matched_gt_inds = matched_gt_inds.cpu()
 
         return (
             gt_matched_classes,

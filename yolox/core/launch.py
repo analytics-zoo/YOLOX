@@ -20,6 +20,8 @@ __all__ = ["launch"]
 
 DEFAULT_TIMEOUT = timedelta(minutes=30)
 
+# gpu or not
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 def _find_free_port():
     """
@@ -109,9 +111,6 @@ def _distributed_worker(
     args,
     timeout=DEFAULT_TIMEOUT,
 ):
-    assert (
-        torch.cuda.is_available()
-    ), "cuda is not available. Please check your installation."
     global_rank = machine_rank * num_gpus_per_machine + local_rank
     logger.info("Rank {} initialization finished.".format(global_rank))
     try:
@@ -140,8 +139,5 @@ def _distributed_worker(
     # synchronize is needed here to prevent a possible timeout after calling init_process_group
     # See: https://github.com/facebookresearch/maskrcnn-benchmark/issues/172
     comm.synchronize()
-
-    assert num_gpus_per_machine <= torch.cuda.device_count()
-    torch.cuda.set_device(local_rank)
 
     main_func(*args)
