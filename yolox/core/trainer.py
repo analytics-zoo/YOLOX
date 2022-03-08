@@ -8,14 +8,17 @@ import time
 from loguru import logger
 
 import torch
+import torch.nn as nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+
+from bigdl.orca.learn.pytorch import Estimator
+from bigdl.orca.learn.metrics import Accuracy
+from bigdl.orca.learn.trigger import EveryEpoch
 
 from yolox.utils import (
     MeterBuffer,
     ModelEMA,
-    WandbLogger,
-    adjust_status,
     all_reduce_norm,
     get_local_rank,
     get_model_info,
@@ -140,6 +143,11 @@ class Trainer:
             no_aug=self.no_aug,
             cache_img=self.args.cache,
         )
+        print(self.is_distributed)
+        self.val_loader = self.exp.get_eval_loader(
+            batch_size=self.args.batch_size,
+            is_distributed=self.is_distributed)
+
         # max_iter means iters per epoch
         self.max_iter = len(self.train_loader)
 
@@ -157,22 +165,39 @@ class Trainer:
             self.ema_model.updates = self.max_iter * self.start_epoch
 
         self.model = model
-
-        self.evaluator = self.exp.get_evaluator(
-            batch_size=self.args.batch_size, is_distributed=self.is_distributed
-        )
-        # Tensorboard and Wandb loggers
+        self.model.train()
+        if self.args.dist_backend == "bigdl":
+            self.evaluator = Estimator.from_torch(model=self.model,
+                                                  optimizer=self.optimizer,
+                                                  loss=nn.CrossEntropyLoss(),
+                                                  metrics=[Accuracy()],
+                                                  backend=self.args.dist_backend)
+            print(self.train_loader.batch_size)
+            print(self.args.batch_size)
+            self.evaluator.fit(data=self.train_loader, epochs=self.max_epoch,
+                               validation_data=self.val_loader, checkpoint_trigger=EveryEpoch())
+            res = self.evaluator.evaluate(data=self.val_loader)
+            print("Accuracy of the network on the test images: %s" % res)
+        elif self.args.dist_backend in ["torch_distributed", "spark"]:
+            self.evaluator =  Estimator.from_torch(model=self.model,
+                                          optimizer=self.optimizer,
+                                          loss=nn.CrossEntropyLoss(),
+                                          metrics=[Accuracy()],
+                                          model_dir=os.getcwd(),
+                                          backend=self.args.dist_backend,
+                                          use_tqdm=True)
+            self.evaluator.fit(data=self.train_loader, epochs=self.max_epoch,
+                               batch_size=self.args.batch_size)
+            res = self.evaluator.evaluate(data=self.val_loader)
+            for r in res:
+                print(r, ":", res[r])
+        else:
+            raise NotImplementedError(
+                "Only bigdl, torch_distributed, and spark are supported as the backend,"
+                " but got {}".format(args.backend))
+        # Tensorboard logger
         if self.rank == 0:
-            if self.args.logger == "tensorboard":
-                self.tblogger = SummaryWriter(os.path.join(self.file_name, "tensorboard"))
-            elif self.args.logger == "wandb":
-                wandb_params = dict()
-                for k, v in zip(self.args.opts[0::2], self.args.opts[1::2]):
-                    if k.startswith("wandb-"):
-                        wandb_params.update({k.lstrip("wandb-"): v})
-                self.wandb_logger = WandbLogger(config=vars(self.exp), **wandb_params)
-            else:
-                raise ValueError("logger must be either 'tensorboard' or 'wandb'")
+            self.tblogger = SummaryWriter(os.path.join(self.file_name, "tensorboard"))
 
         logger.info("Training start...")
         logger.info("\n{}".format(model))
@@ -181,9 +206,6 @@ class Trainer:
         logger.info(
             "Training of experiment is done and the best AP is {:.2f}".format(self.best_ap * 100)
         )
-        if self.rank == 0:
-            if self.args.logger == "wandb":
-                self.wandb_logger.finish()
 
     def before_epoch(self):
         logger.info("---> start train epoch{}".format(self.epoch + 1))
@@ -246,12 +268,6 @@ class Trainer:
                 )
                 + (", size: {:d}, {}".format(self.input_size[0], eta_str))
             )
-
-            if self.rank == 0:
-                if self.args.logger == "wandb":
-                    self.wandb_logger.log_metrics({k: v.latest for k, v in loss_meter.items()})
-                    self.wandb_logger.log_metrics({"lr": self.meter["lr"].latest})
-
             self.meter.clear_meters()
 
         # random resizing
@@ -307,24 +323,18 @@ class Trainer:
             if is_parallel(evalmodel):
                 evalmodel = evalmodel.module
 
-        with adjust_status(evalmodel, training=False):
-            ap50_95, ap50, summary = self.exp.eval(
-                evalmodel, self.evaluator, self.is_distributed
-            )
-
+        ap50_95, ap50, summary = self.exp.eval(
+            evalmodel,
+            self.exp.get_evaluator(batch_size=self.args.batch_size, is_distributed=self.is_distributed),
+            self.is_distributed
+        )
         update_best_ckpt = ap50_95 > self.best_ap
         self.best_ap = max(self.best_ap, ap50_95)
 
+        self.model.train()
         if self.rank == 0:
-            if self.args.logger == "tensorboard":
-                self.tblogger.add_scalar("val/COCOAP50", ap50, self.epoch + 1)
-                self.tblogger.add_scalar("val/COCOAP50_95", ap50_95, self.epoch + 1)
-            if self.args.logger == "wandb":
-                self.wandb_logger.log_metrics({
-                    "val/COCOAP50": ap50,
-                    "val/COCOAP50_95": ap50_95,
-                    "epoch": self.epoch + 1,
-                })
+            self.tblogger.add_scalar("val/COCOAP50", ap50, self.epoch + 1)
+            self.tblogger.add_scalar("val/COCOAP50_95", ap50_95, self.epoch + 1)
             logger.info("\n" + summary)
         synchronize()
 
@@ -348,6 +358,3 @@ class Trainer:
                 self.file_name,
                 ckpt_name,
             )
-
-            if self.args.logger == "wandb":
-                self.wandb_logger.save_checkpoint(self.file_name, ckpt_name, update_best_ckpt)
