@@ -13,15 +13,16 @@ from yolox.core import Trainer, launch
 from yolox.exp import get_exp
 from yolox.utils import configure_nccl, configure_omp, get_num_devices
 
+from bigdl.orca import init_orca_context, stop_orca_context
 
 def make_parser():
     parser = argparse.ArgumentParser("YOLOX train parser")
     parser.add_argument("-expn", "--experiment-name", type=str, default=None)
     parser.add_argument("-n", "--name", type=str, default=None, help="model name")
-
+    parser.add_argument('--cluster_mode', type=str, default="local", help='The cluster mode')
     # distributed
     parser.add_argument(
-        "--dist-backend", default="nccl", type=str, help="distributed backend"
+        "--dist-backend", default="bigdl", type=str, help="distributed backend"
     )
     parser.add_argument(
         "--dist-url",
@@ -30,6 +31,9 @@ def make_parser():
         help="url used to set up distributed training",
     )
     parser.add_argument("-b", "--batch-size", type=int, default=64, help="batch size")
+    parser.add_argument('--epochs', type=int, default=2, help='The number of epochs to train for')
+    parser.add_argument("--executor_memory", type=str, default="5g", help="executor memory")
+    parser.add_argument("--driver_memory", type=str, default="5g", help="driver memory")
     parser.add_argument(
         "-d", "--devices", default=None, type=int, help="device for training"
     )
@@ -80,13 +84,6 @@ def make_parser():
         help="occupy GPU memory first for training.",
     )
     parser.add_argument(
-        "-l",
-        "--logger",
-        type=str,
-        help="Logger to be used for metrics",
-        default="tensorboard"
-    )
-    parser.add_argument(
         "opts",
         help="Modify config options using the command-line",
         default=None,
@@ -111,6 +108,15 @@ def main(exp, args):
 
 if __name__ == "__main__":
     args = make_parser().parse_args()
+    if args.cluster_mode == "local":
+        init_orca_context(memory="4g")
+    elif args.cluster_mode.startswith("yarn"):
+        if args.cluster_mode == "yarn-client":
+            init_orca_context(cluster_mode="yarn-client")
+        elif args.cluster_mode == "yarn-cluster":
+            init_orca_context(cluster_mode="yarn-cluster", memory=args.executor_memory, driver_memory=args.driver_memory)
+    elif args.cluster_mode == "spark-submit":
+        init_orca_context(cluster_mode="spark-submit")
     exp = get_exp(args.exp_file, args.name)
     exp.merge(args.opts)
 
@@ -130,3 +136,4 @@ if __name__ == "__main__":
         dist_url=dist_url,
         args=(exp, args),
     )
+    stop_orca_context()
