@@ -82,7 +82,7 @@ class DataLoader(torchDataLoader):
             # batch_sampler = IterationBasedBatchSampler(batch_sampler, num_iterations =
 
         self.batch_sampler = batch_sampler
-
+        self.batch_size = self.batch_sampler.batch_size    #modify there ，otherwise orca gets batch size is None
         self.__initialized = True
 
     def close_mosaic(self):

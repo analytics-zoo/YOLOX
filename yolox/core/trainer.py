@@ -10,6 +10,11 @@ from loguru import logger
 import torch
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
+from bigdl.orca.learn.pytorch import Estimator
+from bigdl.orca.learn.metrics import Accuracy
+from bigdl.orca.learn.trigger import EveryEpoch
+from yolox.exp import get_exp
+import torch.nn as nn
 
 from yolox.utils import (
     MeterBuffer,
@@ -29,6 +34,52 @@ from yolox.utils import (
     setup_logger,
     synchronize
 )
+
+def model_creator(config):
+    args = config['args']
+    exp = get_exp(args.exp_file,args.name)
+    model = exp.get_model()
+    is_distributed = config['is_distributed']
+    if is_distributed:
+        model = DDP(model, device_ids=[get_local_rank()], broadcast_buffers=False)
+    return model
+    # if config['model'] is not None :
+    #    return config["model"]
+   
+
+def optimizer_creator(model, config):
+    args = config['args']
+    exp = get_exp(args.exp_file,args.name)
+    exp.get_model()
+    optimizer = exp.get_optimizer(args.batch_size)
+    return optimizer
+   
+
+def train_loader_creator(config, batch_size):
+    args = config['args']
+    is_distributed = config['is_distributed']
+    no_aug = config['no_aug']
+    exp = get_exp(args.exp_file,args.name)
+    data_loader=exp.get_data_loader(
+            batch_size=args.batch_size,
+            is_distributed=is_distributed,
+            no_aug=no_aug,
+            cache_img=args.cache,
+    )
+    return data_loader
+    # if config['train_loader'] is not None :
+    #    return config["train_loader"]
+    # return _train_loader
+
+
+def test_loader_creator(config, batch_size):
+    args = config['args']
+    is_distributed = config['is_distributed']
+    exp = get_exp(args.exp_file,args.name)
+    val_loader = exp.get_eval_loader(
+        batch_size=args.batch_size,
+            is_distributed=is_distributed)
+    return val_loader  
 
 
 class Trainer:
@@ -66,6 +117,129 @@ class Trainer:
             filename="train_log.txt",
             mode="a",
         )
+    #在orca上训练
+    def train_in_orca(self):
+        logger.info("args: {}".format(self.args))
+        logger.info("exp value:\n{}".format(self.exp))
+
+        # model related init
+        model = self.exp.get_model()
+        logger.info(
+            "Model Summary: {}".format(get_model_info(model, self.exp.test_size))
+        )
+        model.to(self.device)
+
+        # solver related init
+        self.optimizer = self.exp.get_optimizer(self.args.batch_size)
+
+        # value of epoch will be set in `resume_train`
+        model = self.resume_train(model)
+
+        # data related init
+        self.no_aug = self.start_epoch >= self.max_epoch - self.exp.no_aug_epochs
+
+        self.train_loader = self.exp.get_data_loader(
+            batch_size=self.args.batch_size,
+            is_distributed=self.is_distributed,
+            no_aug=self.no_aug,
+            cache_img=self.args.cache,
+        )
+        print(self.is_distributed)
+        self.val_loader = self.exp.get_eval_loader(
+            batch_size=self.args.batch_size,
+            is_distributed=self.is_distributed)
+
+        # max_iter means iters per epoch
+        self.max_iter = len(self.train_loader)
+
+        self.lr_scheduler = self.exp.get_lr_scheduler(
+            self.exp.basic_lr_per_img * self.args.batch_size, self.max_iter
+        )
+        if self.args.occupy:
+            occupy_mem(self.local_rank)
+
+        if self.is_distributed:
+            model = DDP(model, device_ids=[self.local_rank], broadcast_buffers=False)
+
+        if self.use_model_ema:
+            self.ema_model = ModelEMA(model, 0.9998)
+            self.ema_model.updates = self.max_iter * self.start_epoch
+
+        self.model = model
+        self.evaluator = self.exp.get_evaluator(
+            batch_size=self.args.batch_size, is_distributed=self.is_distributed
+        )
+        #self.model.train()
+        if self.args.dist_backend == "bigdl":
+            self.evaluator = Estimator.from_torch(model=self.model,
+                                                  optimizer=self.optimizer,
+                                                  loss=nn.CrossEntropyLoss(),
+                                                  metrics=[Accuracy()],
+                                                  backend=self.args.dist_backend)
+            print(self.train_loader.batch_size)
+            print(self.args.batch_size)
+            logger.info("11111111111111: {}".format(self.train_loader.batch_size))
+            logger.info("11111111111111: {}".format(self.args.batch_size))
+
+            self.evaluator.fit(data=self.train_loader, epochs=self.max_epoch,
+                               validation_data=self.val_loader, checkpoint_trigger=EveryEpoch())
+            evalmodel = self.evaluator.get_model()
+            self.ema_model.ema = evalmodel
+            self.save_ckpt(ckpt_name="orca_model")
+            logger.info(
+            "Model has saved: {}".format(get_model_info(evalmodel, self.exp.test_size))
+        )
+            # res = self.evaluator.evaluate(data=self.val_loader)
+            # print("Accuracy of the network on the test images: %s" % res)
+        elif self.args.dist_backend in ["torch_distributed", "spark"]:
+            #orca spark中，会再次调用这几个函数，因此重要参数等要存储在config中
+            config = {'args': self.args, 'no_aug':self.no_aug , 'is_distributed' :self.is_distributed,
+                  'model':self.model ,'input_size':self.exp.input_size
+            }
+            
+            orca_estimator =  Estimator.from_torch(model=model_creator,
+                                          optimizer=optimizer_creator,
+                                          loss=nn.CrossEntropyLoss(),
+                                          config=config,
+                                          metrics=[Accuracy()],
+                                          model_dir=os.getcwd(),
+                                          backend=self.args.dist_backend,
+                                          use_tqdm=True)
+            stats = orca_estimator.fit(data=train_loader_creator, epochs=self.max_epoch,
+                               batch_size=self.args.batch_size)
+            logger.info('ppppp')
+            for epochinfo in stats:
+                logger.info("===> Epoch {} Complete: Avg. Loss: {:.4f}"
+                  .format(epochinfo['epoch'], epochinfo["train_loss"]))
+            self.epoch = 0
+            evalmodel = orca_estimator.get_model()
+            self.ema_model.ema = evalmodel
+            self.save_ckpt(ckpt_name="orca_model")
+            logger.info(
+            "Model has saved: {}".format(get_model_info(evalmodel, self.exp.test_size))
+        )   
+            # res = orca_estimator.evaluate(data=test_loader_creator,batch_size=self.args.batch_size)
+            # for r in res:
+            #     print(r, ":", res[r])
+        else:
+            raise NotImplementedError(
+                "Only bigdl, torch_distributed, and spark are supported as the backend,"
+                " but got {}".format(args.backend))
+        logger.info("cccccc")
+        model.eval()
+        # Tensorboard logger
+        if self.rank == 0:
+             self.tblogger = SummaryWriter(os.path.join(self.file_name, "tensorboard"))
+        self.epoch = 0
+        # load the model state dict
+        # model.load_state_dict(self.ema_model.ema.state_dict())
+        if self.ema_model.ema is None:
+            raise NotImplementedError("After training, get empty model")
+        self.evaluate_and_save_model_orca(self.ema_model.ema)
+        self.after_train()
+
+    #    logger.info("\n{}".format(evalmodel))
+
 
     def train(self):
         self.before_train()
@@ -348,6 +522,25 @@ class Trainer:
                 self.file_name,
                 ckpt_name,
             )
+            
+    def evaluate_and_save_model_orca(self,evalmodel):
+    
+        ap50_95, ap50, summary = self.exp.eval(
+            evalmodel,
+            self.exp.get_evaluator(batch_size=self.args.batch_size, is_distributed=self.is_distributed),
+            self.is_distributed
+        )
+        update_best_ckpt = ap50_95 > self.best_ap
+        self.best_ap = max(self.best_ap, ap50_95)
 
-            if self.args.logger == "wandb":
-                self.wandb_logger.save_checkpoint(self.file_name, ckpt_name, update_best_ckpt)
+        self.model.train()
+        if self.rank == 0:
+            self.tblogger.add_scalar("val/COCOAP50", ap50, self.epoch + 1)
+            self.tblogger.add_scalar("val/COCOAP50_95", ap50_95, self.epoch + 1)
+            logger.info("\n" + summary)
+        synchronize()
+
+        self.save_ckpt("last_epoch", update_best_ckpt)
+        if self.save_history_ckpt:
+            self.save_ckpt(f"epoch_{self.epoch + 1}")
+
