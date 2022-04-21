@@ -169,30 +169,8 @@ class Trainer:
         self.evaluator = self.exp.get_evaluator(
             batch_size=self.args.batch_size, is_distributed=self.is_distributed
         )
-        #self.model.train()
-        if self.args.dist_backend == "bigdl":
-            self.evaluator = Estimator.from_torch(model=self.model,
-                                                  optimizer=self.optimizer,
-                                                  loss=nn.CrossEntropyLoss(),
-                                                  metrics=[Accuracy()],
-                                                  backend=self.args.dist_backend)
-            print(self.train_loader.batch_size)
-            print(self.args.batch_size)
-            logger.info("11111111111111: {}".format(self.train_loader.batch_size))
-            logger.info("11111111111111: {}".format(self.args.batch_size))
-
-            self.evaluator.fit(data=self.train_loader, epochs=self.max_epoch,
-                               validation_data=self.val_loader, checkpoint_trigger=EveryEpoch())
-            evalmodel = self.evaluator.get_model()
-            self.ema_model.ema = evalmodel
-            self.save_ckpt(ckpt_name="orca_model")
-            logger.info(
-            "Model has saved: {}".format(get_model_info(evalmodel, self.exp.test_size))
-        )
-            # res = self.evaluator.evaluate(data=self.val_loader)
-            # print("Accuracy of the network on the test images: %s" % res)
-        elif self.args.dist_backend in ["torch_distributed", "spark"]:
-            #orca spark中，会再次调用这几个函数，因此重要参数等要存储在config中
+        
+        if self.args.dist_backend in ["torch_distributed", "spark"]:
             config = {'args': self.args, 'no_aug':self.no_aug , 'is_distributed' :self.is_distributed,
                   'model':self.model ,'input_size':self.exp.input_size
             }
@@ -207,7 +185,7 @@ class Trainer:
                                           use_tqdm=True)
             stats = orca_estimator.fit(data=train_loader_creator, epochs=self.max_epoch,
                                batch_size=self.args.batch_size)
-            logger.info('ppppp')
+
             for epochinfo in stats:
                 logger.info("===> Epoch {} Complete: Avg. Loss: {:.4f}"
                   .format(epochinfo['epoch'], epochinfo["train_loss"]))
@@ -225,7 +203,6 @@ class Trainer:
             raise NotImplementedError(
                 "Only bigdl, torch_distributed, and spark are supported as the backend,"
                 " but got {}".format(args.backend))
-        logger.info("cccccc")
         model.eval()
         # Tensorboard logger
         if self.rank == 0:
